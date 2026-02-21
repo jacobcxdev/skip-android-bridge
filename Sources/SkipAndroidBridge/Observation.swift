@@ -8,6 +8,9 @@ import FoundationEssentials
 #else
 import Foundation
 #endif
+#if canImport(Android)
+import Android
+#endif
 import Dispatch
 
 public struct Observation {
