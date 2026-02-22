@@ -108,9 +108,11 @@ public final class ObservationRecording {
         var key: pthread_key_t = 0
         pthread_key_create(&key) { ptr in
             // Destructor: release the Unmanaged box when thread exits
-            if let ptr = ptr {
-                Unmanaged<FrameStack>.fromOpaque(ptr).release()
-            }
+            // Note: ptr optionality varies by platform (Darwin/Android SDK = Optional,
+            // Skip/Bionic = non-Optional). Assign to Optional to satisfy both.
+            let rawPtr: UnsafeMutableRawPointer? = ptr
+            guard let rawPtr else { return }
+            Unmanaged<FrameStack>.fromOpaque(rawPtr).release()
         }
         return key
     }()
