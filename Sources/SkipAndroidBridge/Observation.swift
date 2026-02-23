@@ -13,9 +13,9 @@ import Android
 #endif
 import Dispatch
 
-public struct Observation {
+public struct BridgeObservation {
     @available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *)
-    public struct ObservationRegistrar: Sendable, Equatable, Hashable {
+    public struct BridgeObservationRegistrar: Sendable, Equatable, Hashable {
         private let registrar = ObservationModule.ObservationRegistrarType()
         private let bridgeSupport = BridgeObservationSupport()
 
