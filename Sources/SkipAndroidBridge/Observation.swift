@@ -12,6 +12,7 @@ import Foundation
 import Android
 #endif
 import Dispatch
+import os
 
 public struct BridgeObservation {
     @available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *)
@@ -202,8 +203,8 @@ private final class BridgeObservationSupport: @unchecked Sendable {
     /// Trigger a single MutableStateBacking counter increment for Compose recomposition.
     /// Called from withObservationTracking's onChange handler.
     func triggerSingleUpdate() {
-        lock.wait()
-        defer { lock.signal() }
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
         guard Java_hasInitialized, Java_peer != nil else { return }
         Java_update(0)
     }
@@ -217,8 +218,8 @@ private final class BridgeObservationSupport: @unchecked Sendable {
     private var Java_hasInitialized = false
 
     private func Java_init(forKeyPath keyPath: AnyKeyPath) -> Int {
-        lock.wait()
-        defer { lock.signal() }
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
         if !Java_hasInitialized {
             Java_hasInitialized = true
             Java_peer = Java_initPeer()
@@ -266,7 +267,7 @@ private final class BridgeObservationSupport: @unchecked Sendable {
         }
     }
 
-    private let lock = DispatchSemaphore(value: 1)
+    private var lock = os_unfair_lock()
     private var indexes: [AnyKeyPath: Int] = [:]
 
     private func index(forKeyPath keyPath: AnyKeyPath) -> Int {
