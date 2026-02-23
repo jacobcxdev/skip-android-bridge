@@ -12,7 +12,9 @@ import Foundation
 import Android
 #endif
 import Dispatch
+#if canImport(os)
 import os
+#endif
 
 public struct BridgeObservation {
     @available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *)
@@ -186,6 +188,21 @@ public final class ObservationRecording {
     }
 }
 
+/// Cross-platform unfair lock abstraction.
+/// Uses os_unfair_lock on Darwin, pthread_mutex_t on Android/Linux.
+private struct PlatformLock {
+    #if canImport(os)
+    private var _lock = os_unfair_lock()
+    mutating func lock() { os_unfair_lock_lock(&_lock) }
+    mutating func unlock() { os_unfair_lock_unlock(&_lock) }
+    #else
+    private var _mutex = pthread_mutex_t()
+    init() { pthread_mutex_init(&_mutex, nil) }
+    mutating func lock() { pthread_mutex_lock(&_mutex) }
+    mutating func unlock() { pthread_mutex_unlock(&_mutex) }
+    #endif
+}
+
 private final class BridgeObservationSupport: @unchecked Sendable {
     init() {
     }
@@ -203,8 +220,8 @@ private final class BridgeObservationSupport: @unchecked Sendable {
     /// Trigger a single MutableStateBacking counter increment for Compose recomposition.
     /// Called from withObservationTracking's onChange handler.
     func triggerSingleUpdate() {
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
+        lock.lock()
+        defer { lock.unlock() }
         guard Java_hasInitialized, Java_peer != nil else { return }
         Java_update(0)
     }
@@ -218,8 +235,8 @@ private final class BridgeObservationSupport: @unchecked Sendable {
     private var Java_hasInitialized = false
 
     private func Java_init(forKeyPath keyPath: AnyKeyPath) -> Int {
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
+        lock.lock()
+        defer { lock.unlock() }
         if !Java_hasInitialized {
             Java_hasInitialized = true
             Java_peer = Java_initPeer()
@@ -267,7 +284,7 @@ private final class BridgeObservationSupport: @unchecked Sendable {
         }
     }
 
-    private var lock = os_unfair_lock()
+    private var lock = PlatformLock()
     private var indexes: [AnyKeyPath: Int] = [:]
 
     private func index(forKeyPath keyPath: AnyKeyPath) -> Int {
