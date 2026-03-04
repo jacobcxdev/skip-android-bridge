@@ -14,11 +14,34 @@ import Android
 import Dispatch
 #if canImport(os)
 import os
+#elseif canImport(AndroidLogging)
+import AndroidLogging
+#endif
+#if canImport(AndroidNDK)
+import AndroidNDK
 #endif
 
-public struct BridgeObservation {
+/// Public debug logging helper for navigation debugging across packages.
+/// Uses `__android_log_write` directly to reach Android logcat, bypassing
+/// `os.Logger` which lacks `init(subsystem:category:)` on Android.
+/// Filter with: `adb logcat -s "skip/NAV_DEBUG"`
+@inline(__always)
+public func _navDebugLog(_ msg: String) {
+    #if os(Android) && canImport(AndroidNDK)
+    __android_log_write(3, "skip/NAV_DEBUG", msg) // 3 = ANDROID_LOG_DEBUG
+    #endif
+}
+
+@inline(__always)
+private func navLog(_ msg: @autoclosure () -> String) {
+    #if FUSE_NAV_DEBUG
+    _navDebugLog(msg())
+    #endif
+}
+
+public struct Observation {
     @available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *)
-    public struct BridgeObservationRegistrar: Sendable, Equatable, Hashable {
+    public struct ObservationRegistrar: Sendable, Equatable, Hashable {
         private let registrar = ObservationModule.ObservationRegistrarType()
         private let bridgeSupport = BridgeObservationSupport()
 
@@ -26,6 +49,7 @@ public struct BridgeObservation {
         }
 
         public func access<Subject, Member>(_ subject: Subject, keyPath: KeyPath<Subject, Member>) where Subject : Observable {
+            navLog("access: subject=\(type(of: subject)), isRecording=\(ObservationRecording.isRecording)")
             if ObservationRecording.isRecording {
                 ObservationRecording.recordAccess(
                     replay: { [registrar] in registrar.access(subject, keyPath: keyPath) },
@@ -37,9 +61,8 @@ public struct BridgeObservation {
         }
 
         public func willSet<Subject, Member>(_ subject: Subject, keyPath: KeyPath<Subject, Member>) where Subject : Observable {
-            if !ObservationRecording.isEnabled {
-                bridgeSupport.willSet(subject, keyPath: keyPath)
-            }
+            navLog("willSet: subject=\(type(of: subject))")
+            bridgeSupport.willSet(subject, keyPath: keyPath)
             registrar.willSet(subject, keyPath: keyPath)
         }
 
@@ -48,9 +71,8 @@ public struct BridgeObservation {
         }
 
         public func withMutation<Subject, Member, T>(of subject: Subject, keyPath: KeyPath<Subject, Member>, _ mutation: () throws -> T) rethrows -> T where Subject : Observable {
-            if !ObservationRecording.isEnabled {
-                bridgeSupport.willSet(subject, keyPath: keyPath)
-            }
+            navLog("withMutation: subject=\(type(of: subject))")
+            bridgeSupport.willSet(subject, keyPath: keyPath)
             return try registrar.withMutation(of: subject, keyPath: keyPath, mutation)
         }
 
@@ -85,9 +107,11 @@ public struct BridgeObservation {
 /// Each startRecording() pushes a new frame; each stopAndObserve() pops and processes its own frame.
 @available(macOS 14.0, iOS 17.0, watchOS 10.0, tvOS 17.0, *)
 public final class ObservationRecording {
-    /// True once hooks are registered — gates bridgeSupport.willSet() suppression.
-    /// When false (no hooks), bridgeSupport.willSet() fires normally (original behavior).
-    /// When true, withObservationTracking handles recomposition instead.
+    /// True once hooks are registered — enables the record-and-replay observation path.
+    /// When true, access() calls during body evaluation are recorded and replayed
+    /// inside withObservationTracking to set up proper observation subscriptions.
+    /// bridgeSupport.willSet() always fires regardless of this flag to ensure
+    /// non-recorded accesses (binding closures, getData callbacks) trigger recomposition.
     /// This is intentionally a one-way flag: set once at app startup when the native
     /// bridge loads. The bridge is either present or not — there is no use case for
     /// disabling it at runtime.
@@ -143,11 +167,13 @@ public final class ObservationRecording {
     }
 
     public static func startRecording() {
+        navLog("startRecording: depth=\(threadStack.frames.count)")
         threadStack.frames.append(Frame())
     }
 
     public static func stopAndObserve() {
         guard let frame = threadStack.frames.popLast() else { return }
+        navLog("stopAndObserve: closures=\(frame.replayClosures.count), hasTrigger=\(frame.triggerClosure != nil)")
         guard !frame.replayClosures.isEmpty else { return }
         guard let trigger = frame.triggerClosure else {
             assertionFailure("ObservationRecording: replay closures recorded but no trigger")
@@ -176,6 +202,7 @@ public final class ObservationRecording {
         trigger: @escaping () -> Void
     ) {
         let stack = threadStack
+        navLog("recordAccess: frameCount=\(stack.frames.count)")
         guard !stack.frames.isEmpty else { return }
         stack.frames[stack.frames.count - 1].replayClosures.append(replay)
         // Any single MutableStateBacking.update(0) call triggers Compose recomposition
@@ -209,11 +236,13 @@ private final class BridgeObservationSupport: @unchecked Sendable {
 
     public func access<Subject, Member>(_ subject: Subject, keyPath: KeyPath<Subject, Member>) {
         let index = Java_init(forKeyPath: keyPath)
+        navLog("bridge.access: index=\(index)")
         Java_access(index)
     }
 
     public func willSet<Subject, Member>(_ subject: Subject, keyPath: KeyPath<Subject, Member>) {
         let index = Java_init(forKeyPath: keyPath)
+        navLog("bridge.willSet: index=\(index)")
         Java_update(index)
     }
 
@@ -222,6 +251,7 @@ private final class BridgeObservationSupport: @unchecked Sendable {
     func triggerSingleUpdate() {
         lock.lock()
         defer { lock.unlock() }
+        navLog("triggerSingleUpdate: hasInit=\(Java_hasInitialized), peer=\(Java_peer != nil)")
         guard Java_hasInitialized, Java_peer != nil else { return }
         Java_update(0)
     }
@@ -241,10 +271,9 @@ private final class BridgeObservationSupport: @unchecked Sendable {
             Java_hasInitialized = true
             Java_peer = Java_initPeer()
         }
-        guard Java_peer != nil else {
-            return 0
-        }
-        return index(forKeyPath: keyPath)
+        let index = Java_peer != nil ? index(forKeyPath: keyPath) : 0
+        navLog("Java_init: isJNI=\(isJNIInitialized), hasInit=\(Java_hasInitialized), peer=\(Java_peer != nil), index=\(index)")
+        return index
     }
 
     private func Java_initPeer() -> JObject? {
@@ -261,6 +290,7 @@ private final class BridgeObservationSupport: @unchecked Sendable {
     }
 
     private func Java_access(_ index: Int) {
+        navLog("Java_access(\(index)): peer=\(Java_peer != nil)")
         guard isJNIInitialized, let peer = Java_peer else {
             return
         }
@@ -273,6 +303,7 @@ private final class BridgeObservationSupport: @unchecked Sendable {
     }
 
     private func Java_update(_ index: Int) {
+        navLog("Java_update(\(index)): peer=\(Java_peer != nil)")
         guard isJNIInitialized, let peer = Java_peer else {
             return
         }
