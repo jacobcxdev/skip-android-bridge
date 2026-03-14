@@ -55,7 +55,8 @@ public class AndroidBridge {
         }
 
         let context = ProcessInfo.processInfo.androidContext
-        try AndroidBridgeBootstrap.initAndroidBridge(filesDir: context.getFilesDir().getAbsolutePath(), cacheDir: context.getCacheDir().getAbsolutePath())
+        let locale = java.util.Locale.getDefault().toLanguageTag()
+        try AndroidBridgeBootstrap.initAndroidBridge(filesDir: context.getFilesDir().getAbsolutePath(), cacheDir: context.getCacheDir().getAbsolutePath(), locale: locale)
     }
 }
 #endif
@@ -66,13 +67,17 @@ public class AndroidBridge {
 public class AndroidBridgeBootstrap {
     private static var androidBridgeInit = false
 
+    /// The device's locale identifier (BCP 47 language tag), as reported by the Android system.
+    /// `nil` on non-Android platforms or before bridge initialization.
+    public fileprivate(set) static var deviceLocaleIdentifier: String?
+
     /// Perform all the setup that is needed to get `Foundation` idioms working with Android conventions.
     ///
     /// This includes:
     /// - Using the Android certificate store for HTTPS validation
     /// - Using the Android context file locations for `FileManager.url`
     // SKIP @bridge
-    public static func initAndroidBridge(filesDir: String, cacheDir: String) throws {
+    public static func initAndroidBridge(filesDir: String, cacheDir: String, locale: String) throws {
         if Self.androidBridgeInit == true { return }
         defer { Self.androidBridgeInit = true }
 
@@ -87,6 +92,8 @@ public class AndroidBridgeBootstrap {
         try AssetURLProtocol.register()
         logger.debug("initAndroidBridge: bootstrapTimezone")
         try bootstrapTimezone()
+        logger.debug("initAndroidBridge: bootstrapLocale")
+        bootstrapLocale(languageTag: locale)
         logger.debug("initAndroidBridge: setupCACerts")
         try AndroidBootstrap.setupCACerts()
         logger.debug("initAndroidBridge: AndroidLooper.setupMainLooper")
@@ -108,6 +115,14 @@ private func bootstrapTimezone() throws {
         setenv("TZ", name, 0)
     }
 
+}
+
+private func bootstrapLocale(languageTag: String) {
+    // Swift Foundation on non-Darwin hardcodes Locale.current to en_001 (Locale_Cache.swift),
+    // ignoring the Android device locale. Store it and set LANG for POSIX/C APIs.
+    AndroidBridgeBootstrap.deviceLocaleIdentifier = languageTag
+    let posix = languageTag.replacingOccurrences(of: "-", with: "_")
+    setenv("LANG", posix + ".UTF-8", 1)
 }
 
 private func bootstrapFileManagerProperties(filesDir: String, cacheDir: String) throws {
@@ -140,3 +155,35 @@ extension URL {
 }
 
 #endif
+
+// MARK: - Device Locale
+
+extension Locale {
+    /// The device's actual locale.
+    ///
+    /// On Android, Swift Foundation hardcodes `Locale.current` to `en_001` (English - World),
+    /// ignoring the device locale. This property returns the locale reported by
+    /// `java.util.Locale.getDefault()`, bridged during `AndroidBridgeBootstrap.initAndroidBridge`.
+    /// On other platforms, returns `Locale.current`.
+    public static var device: Locale {
+        if let id = AndroidBridgeBootstrap.deviceLocaleIdentifier {
+            return Locale(identifier: id)
+        }
+        return .current
+    }
+}
+
+extension Date {
+    /// Formats using the device's actual locale.
+    ///
+    /// Equivalent to `formatted()` on Apple platforms. On Android, works around Swift Foundation
+    /// hardcoding `Locale.current` to `en_001` by using `Locale.device`.
+    public func deviceFormatted() -> String {
+        self.formatted(Date.FormatStyle(date: .numeric, time: .shortened).locale(.device))
+    }
+
+    /// Formats using the device's actual locale with the specified date and time styles.
+    public func deviceFormatted(date: Date.FormatStyle.DateStyle, time: Date.FormatStyle.TimeStyle) -> String {
+        self.formatted(Date.FormatStyle(date: date, time: time).locale(.device))
+    }
+}
